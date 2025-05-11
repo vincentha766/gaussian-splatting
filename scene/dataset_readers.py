@@ -22,6 +22,9 @@ from pathlib import Path
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
+import math
+import trimesh
+import pyrender
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -309,7 +312,169 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
                            is_nerf_synthetic=True)
     return scene_info
 
+def point_rotation(point, axis, angle_deg):
+    """
+    通用点旋转函数
+    
+    参数:
+    - point: 待旋转点
+    - axis: 旋转轴 'x', 'y', 'z'
+    - angle_deg: 旋转角度
+    
+    返回:
+    旋转后的点坐标
+    """
+    angle_rad = np.deg2rad(angle_deg)
+    
+    rotation_matrices = {
+        'x': np.array([
+            [1, 0, 0, 0],
+            [0, np.cos(angle_rad), -np.sin(angle_rad), 0],
+            [0, np.sin(angle_rad), np.cos(angle_rad), 0],
+            [0, 0, 0, 1]
+        ]),
+        'y': np.array([
+            [np.cos(angle_rad), 0, np.sin(angle_rad), 0],
+            [0, 1, 0, 0],
+            [-np.sin(angle_rad), 0, np.cos(angle_rad), 0],
+            [0, 0, 0, 1]
+        ]),
+        'z': np.array([
+            [np.cos(angle_rad), -np.sin(angle_rad), 0, 0],
+            [np.sin(angle_rad), np.cos(angle_rad), 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+    }
+    
+    # 选择旋转矩阵
+    rotation_matrix = rotation_matrices.get(axis.lower())
+    
+    if rotation_matrix is None:
+        raise ValueError("无效的旋转轴")
+    
+    # 确保是齐次坐标
+    homo_point = np.append(point, 1)
+    
+    # 应用旋转
+    rotated_point = rotation_matrix @ homo_point
+    
+    return rotated_point[:3]
+
+def look_at(eye, at, up):
+    z = eye - at
+    z /= np.linalg.norm(z)
+    x = np.cross(up, z)
+    y = np.cross(z, x)
+
+    trans = np.eye(4) # 初始化为单位矩阵
+    trans[:3, 0] = x
+    trans[:3, 1] = y
+    trans[:3, 2] = z
+    trans[:3, 3] = eye
+    return trans
+
+def readSpatialClipCameras(glb_path, angle_step = 5, orbit_axis = "y"):
+    os.environ['PYOPENGL_PLATFORM'] = 'egl'
+    cam_infos = []
+
+    # 读取glb文件
+    mesh = trimesh.load(glb_path)
+    scene = pyrender.Scene.from_trimesh_scene(mesh)
+
+    bounds = scene.bounds
+    center = (bounds[0] + bounds[1]) / 2.0
+    size = bounds[1] - bounds[0]
+    max_dim = max(size)
+    distance = max_dim * 1.5  # Place camera 1.5 times the max dimension away
+
+    camera_position = center.copy()
+
+    if orbit_axis == "x":
+        up = np.array([1.0, 0.0, 0.0])
+        camera_position[2] = camera_position[2] + distance
+    elif orbit_axis == "y":
+        up = np.array([0.0, 1.0, 0.0])
+        camera_position[2] = camera_position[2] + distance
+    elif orbit_axis == "z":
+        up = np.array([0.0, 0.0, 1.0])
+        camera_position[1] = camera_position[1] + distance
+    else:
+        raise ValueError("Invalid orbit axis. Must be one of: x, y, z")
+
+    yfov = 2 * np.arctan(0.5)
+    xfov = 2 * np.arctan(0.5)
+    # Create camera
+    camera = pyrender.PerspectiveCamera(yfov=yfov, aspectRatio=1.0)
+    camera = scene.add(camera)
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=2.0)
+    light = scene.add(light)
+
+    # Create renderer
+    r = pyrender.OffscreenRenderer(400, 400)
+
+    for idx in range(math.floor(360 / angle_step)):
+        angle = idx * angle_step
+        camera_position = point_rotation(camera_position, orbit_axis, angle_step)
+        transform = look_at(camera_position, center, up)
+
+        # transform = np.eye(4)
+
+        scene.set_pose(camera, transform)
+        scene.set_pose(light, transform)
+
+        color, _ = r.render(scene)
+        image = Image.fromarray(color)
+
+        image.save(f'output/test/hey_{angle}.png')
+
+        cam_infos.append(CameraInfo(uid=idx, R=transform[:3, :3], T=transform[:3, 3], FovY=yfov, FovX=xfov, image=image, image_path=None, image_name=f"image_{idx}", width=distance, height=distance))
+
+    # reset scene
+    r.delete()
+
+    return cam_infos
+
+def readSpatialClipSceneInfo(path, eval=False, llffhold=8):
+    pcd = None
+
+    ply_path = os.path.join(os.path.dirname(path), "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 10_000
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    cam_infos = readSpatialClipCameras(glb_path=path, angle_step=5, orbit_axis="y")
+
+    if eval:
+        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "SpatialClip" : readSpatialClipSceneInfo,
 }
