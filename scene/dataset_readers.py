@@ -426,9 +426,10 @@ def readSpatialClipCameras(glb_path, angle_step = 5, orbit_axis = "y"):
         color, _ = r.render(scene)
         image = Image.fromarray(color)
 
+        os.makedirs(f'output/test', exist_ok=True)
         image.save(f'output/test/hey_{angle}.png')
 
-        cam_infos.append(CameraInfo(uid=idx, R=transform[:3, :3], T=transform[:3, 3], FovY=yfov, FovX=xfov, image=image, image_path=None, image_name=f"image_{idx}", width=distance, height=distance))
+        cam_infos.append(CameraInfo(uid=idx, R=transform[:3, :3], T=transform[:3, 3], FovY=focal2fov(xfov, distance), FovX=focal2fov(yfov, distance), image=image, image_path=None, image_name=f"image_{idx}", width=int(distance), height=int(distance)))
 
     # reset scene
     r.delete()
@@ -439,21 +440,17 @@ def readSpatialClipSceneInfo(path, eval=False, llffhold=8):
     pcd = None
 
     ply_path = os.path.join(os.path.dirname(path), "points3d.ply")
-    if not os.path.exists(ply_path):
-        # Since this data set has no colmap data, we start with random points
-        num_pts = 10_000
-        print(f"Generating random point cloud ({num_pts})...")
-        
-        # We create random points inside the bounds of the synthetic Blender scenes
-        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
-        shs = np.random.random((num_pts, 3)) / 255.0
-        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+    # Since this data set has no colmap data, we start with random points
+    num_pts = 10_000
+    print(f"Generating random point cloud ({num_pts})...")
 
-        storePly(ply_path, xyz, SH2RGB(shs) * 255)
-    try:
-        pcd = fetchPly(ply_path)
-    except:
-        pcd = None
+    # We create random points inside the bounds of the synthetic Blender scenes
+    xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+    shs = np.random.random((num_pts, 3)) * 255.0 * 255
+    colors = SH2RGB(shs)
+    pcd = BasicPointCloud(points=xyz, colors=colors, normals=np.zeros((num_pts, 3)))
+
+    storePly(ply_path, xyz, colors)
 
     cam_infos = readSpatialClipCameras(glb_path=path, angle_step=5, orbit_axis="y")
 
