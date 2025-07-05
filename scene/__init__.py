@@ -47,7 +47,7 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.depths, args.eval)
         elif os.path.splitext(args.source_path)[-1] == ".glb":
             print("Found glb file, assuming SpatialClip data set!")
-            scene_info = sceneLoadTypeCallbacks["SpatialClip"](args.source_path, args.eval)
+            scene_info = sceneLoadTypeCallbacks["SpatialClip"](args.source_path, self.model_path, args.eval)
         else:
             assert False, "Could not recognize scene type!"
 

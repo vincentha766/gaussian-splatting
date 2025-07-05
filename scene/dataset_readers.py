@@ -374,7 +374,7 @@ def look_at(eye, at, up):
     trans[:3, 3] = eye
     return trans
 
-def readSpatialClipCameras(glb_path, angle_step = 5, orbit_axis = "y"):
+def readSpatialClipCameras(glb_path, model_path, angle_step = 5, orbit_axis = "y"):
     os.environ['PYOPENGL_PLATFORM'] = 'egl'
     cam_infos = []
 
@@ -402,8 +402,8 @@ def readSpatialClipCameras(glb_path, angle_step = 5, orbit_axis = "y"):
     else:
         raise ValueError("Invalid orbit axis. Must be one of: x, y, z")
 
-    yfov = 2 * np.arctan(0.5)
-    xfov = 2 * np.arctan(0.5)
+    yfov = np.radians(60)  # 60 degrees vertical FOV
+    xfov = np.radians(60)  # 60 degrees horizontal FOV
     # Create camera
     camera = pyrender.PerspectiveCamera(yfov=yfov, aspectRatio=1.0)
     camera = scene.add(camera)
@@ -411,7 +411,7 @@ def readSpatialClipCameras(glb_path, angle_step = 5, orbit_axis = "y"):
     light = scene.add(light)
 
     # Create renderer
-    r = pyrender.OffscreenRenderer(400, 400)
+    r = pyrender.OffscreenRenderer(640, 640)
 
     for idx in range(math.floor(360 / angle_step)):
         angle = idx * angle_step
@@ -426,33 +426,40 @@ def readSpatialClipCameras(glb_path, angle_step = 5, orbit_axis = "y"):
         color, _ = r.render(scene)
         image = Image.fromarray(color)
 
-        os.makedirs(f'output/test', exist_ok=True)
-        image.save(f'output/test/hey_{angle}.png')
+        os.makedirs(f'{model_path}/images', exist_ok=True)
+        image.save(f'{model_path}/images/{angle:04d}.png')
 
-        cam_infos.append(CameraInfo(uid=idx, R=transform[:3, :3], T=transform[:3, 3], FovY=focal2fov(xfov, distance), FovX=focal2fov(yfov, distance), image=image, image_path=None, image_name=f"image_{idx}", width=int(distance), height=int(distance)))
+        cam_infos.append(CameraInfo(
+            uid=idx, R=transform[:3, :3], T=transform[:3, 3],
+            FovY=yfov, FovX=xfov,
+            image_path=f'{model_path}/images/{angle:04d}.png', image_name=str(angle), width=640, height=640,
+            depth_path="", depth_params=None, is_test=False))
 
     # reset scene
     r.delete()
 
     return cam_infos
 
-def readSpatialClipSceneInfo(path, eval=False, llffhold=8):
+def readSpatialClipSceneInfo(source_path, model_path, eval=False, llffhold=8):
     pcd = None
 
-    ply_path = os.path.join(os.path.dirname(path), "points3d.ply")
-    # Since this data set has no colmap data, we start with random points
-    num_pts = 10_000
-    print(f"Generating random point cloud ({num_pts})...")
+    ply_path = os.path.join(model_path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 10_000
+        print(f"Generating random point cloud ({num_pts})...")
 
-    # We create random points inside the bounds of the synthetic Blender scenes
-    xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
-    shs = np.random.random((num_pts, 3)) * 255.0 * 255
-    colors = SH2RGB(shs)
-    pcd = BasicPointCloud(points=xyz, colors=colors, normals=np.zeros((num_pts, 3)))
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) * 255.0 * 255
+        colors = SH2RGB(shs)
+        pcd = BasicPointCloud(points=xyz, colors=colors, normals=np.zeros((num_pts, 3)))
 
-    storePly(ply_path, xyz, colors)
+        storePly(ply_path, xyz, colors)
+    else:
+        pcd = fetchPly(ply_path)
 
-    cam_infos = readSpatialClipCameras(glb_path=path, angle_step=5, orbit_axis="y")
+    cam_infos = readSpatialClipCameras(glb_path=source_path, model_path=model_path, angle_step=1, orbit_axis="y")
 
     if eval:
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
@@ -467,7 +474,8 @@ def readSpatialClipSceneInfo(path, eval=False, llffhold=8):
                            train_cameras=train_cam_infos,
                            test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
-                           ply_path=ply_path)
+                           ply_path=ply_path,
+                           is_nerf_synthetic=False)
     return scene_info
 
 sceneLoadTypeCallbacks = {
