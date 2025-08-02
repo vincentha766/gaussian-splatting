@@ -374,7 +374,8 @@ def look_at(eye, at, up):
     trans[:3, 3] = eye
     return trans
 
-def readSpatialClipCameras(glb_path, model_path, angle_step = 5, orbit_axis = "y"):
+WIDTH_HEIGHT = 1280
+def readSpatialClipCameras(glb_path, model_path, angle_step = 5, orbit_axis = "y") -> list[CameraInfo]:
     os.environ['PYOPENGL_PLATFORM'] = 'egl'
     cam_infos = []
 
@@ -402,37 +403,50 @@ def readSpatialClipCameras(glb_path, model_path, angle_step = 5, orbit_axis = "y
     else:
         raise ValueError("Invalid orbit axis. Must be one of: x, y, z")
 
-    yfov = np.radians(60)  # 60 degrees vertical FOV
-    xfov = np.radians(60)  # 60 degrees horizontal FOV
     # Create camera
-    camera = pyrender.PerspectiveCamera(yfov=yfov, aspectRatio=1.0)
+    camera = pyrender.PerspectiveCamera(yfov=np.radians(60), aspectRatio=1.0)
     camera = scene.add(camera)
     light = pyrender.DirectionalLight(color=np.ones(3), intensity=2.0)
     light = scene.add(light)
+    fovx = np.radians(60)
+    FovY = focal2fov(fov2focal(fovx, WIDTH_HEIGHT), WIDTH_HEIGHT)
+    FovX = fovx
 
     # Create renderer
-    r = pyrender.OffscreenRenderer(640, 640)
+    r = pyrender.OffscreenRenderer(WIDTH_HEIGHT, WIDTH_HEIGHT)
+
+    # create a folder to save the images
+    image_folder = os.path.join(model_path, "images")
+    os.makedirs(image_folder, exist_ok=True)
 
     for idx in range(math.floor(360 / angle_step)):
         angle = idx * angle_step
         camera_position = point_rotation(camera_position, orbit_axis, angle_step)
         transform = look_at(camera_position, center, up)
 
-        # transform = np.eye(4)
+        # NeRF 'transform_matrix' is a camera-to-world transform
+        c2w = transform.copy()
+        # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+        c2w[:3, 1:3] *= -1
+
+        # get the world-to-camera transform and set R, T
+        w2c = np.linalg.inv(c2w)
+        R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+        T = w2c[:3, 3]
 
         scene.set_pose(camera, transform)
         scene.set_pose(light, transform)
 
-        color, _ = r.render(scene)
-        image = Image.fromarray(color)
-
-        os.makedirs(f'{model_path}/images', exist_ok=True)
-        image.save(f'{model_path}/images/{angle:04d}.png')
+        image_path = os.path.join(image_folder, f'{angle:04d}.png')
+        if not os.path.exists(image_path):
+            color, _ = r.render(scene, flags=pyrender.RenderFlags.RGBA)
+            image = Image.fromarray(color)
+            image.save(image_path)
 
         cam_infos.append(CameraInfo(
-            uid=idx, R=transform[:3, :3], T=transform[:3, 3],
-            FovY=yfov, FovX=xfov,
-            image_path=f'{model_path}/images/{angle:04d}.png', image_name=str(angle), width=640, height=640,
+            uid=idx, R=R, T=T,
+            FovY=FovY, FovX=FovX,
+            image_path=image_path, image_name=str(angle), width=WIDTH_HEIGHT, height=WIDTH_HEIGHT,
             depth_path="", depth_params=None, is_test=False))
 
     # reset scene
@@ -444,6 +458,7 @@ def readSpatialClipSceneInfo(source_path, model_path, eval=False, llffhold=8):
     pcd = None
 
     ply_path = os.path.join(model_path, "points3d.ply")
+    os.makedirs(model_path, exist_ok=True)
     if not os.path.exists(ply_path):
         # Since this data set has no colmap data, we start with random points
         num_pts = 10_000
